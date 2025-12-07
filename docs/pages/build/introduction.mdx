@@ -1,60 +1,405 @@
----
-title: EAS Build
-sidebar_title: Introduction
-hideTOC: true
-description: EAS Build is a hosted service for building app binaries for your Expo and React Native projects.
----
+// App.js
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Alert, Dimensions, SafeAreaView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
-import { Cube01Icon } from '@expo/styleguide-icons/outline/Cube01Icon';
+/*
+  نسخة موبايل (Portrait) لشطرنج — ثيم ضوء القمر + قسنطينة (ألوان تركواز)
+  - حركات قانونية شاملة: بيدق (مع ترقية و en-passant)، حصان، فيل، رخ، ملك، ملكة
+  - Castling (O-O, O-O-O)
+  - كشف كش/مات بسيط (يتحقق من حركة قانونية)
+  - بوت بسيط يحرك عشوائياً من بين التحركات القانونية
+  - واجهة بسيطة تعمل على الهاتف (Portrait)
+*/
 
-import { BoxLink } from '~/ui/components/BoxLink';
+/* قطع Unicode */
+const PIECES = {
+  r: "♜", n: "♞", b: "♝", q: "♛", k: "♚", p: "♟",
+  R: "♖", N: "♘", B: "♗", Q: "♕", K: "♔", P: "♙",
+};
 
-**EAS Build** is a hosted service for building app binaries for your Expo and React Native projects.
+const START_BOARD = [
+  ["r","n","b","q","k","b","n","r"],
+  ["p","p","p","p","p","p","p","p"],
+  ["","","","","","","",""],
+  ["","","","","","","",""],
+  ["","","","","","","",""],
+  ["","","","","","","",""],
+  ["P","P","P","P","P","P","P","P"],
+  ["R","N","B","Q","K","B","N","R"]
+];
 
-It makes building your apps for distribution simple and easy to automate by providing defaults that work well for Expo and React Native projects out of the box, and by handling your app signing credentials for you (if you wish). It also makes sharing builds with your team easier than ever with [internal distribution](/build/internal-distribution/) (using ad hoc and/or enterprise "universal" provisioning), deeply integrates with EAS Submit for app store submissions, and has first-class support for the [`expo-updates`](/build/updates/) library.
+const windowW = Dimensions.get("window").width;
+const BOARD_PADDING = 20;
+const BOARD_SIZE = Math.min(windowW - 32, 420); // responsive
+const SQUARE = BOARD_SIZE / 8;
 
-It's designed to work for any native project, whether or not you use Expo and React Native. It's the fastest way to get from `npx create-expo-app` or `npx @react-native-community/cli@latest init` to app stores.
+/* Utilities */
+const clone = (b) => b.map(r => [...r]);
+const inBounds = (x,y) => x>=0 && x<8 && y>=0 && y<8;
+const isWhite = (p) => !!p && p === p.toUpperCase();
+const isSameColor = (a,b) => (!!a && !!b) && (a===a.toUpperCase()) === (b===b.toUpperCase());
 
-### Get started
+/* Game state template */
+function createInitialState(board = START_BOARD) {
+  return {
+    board: clone(board),
+    turn: "w",
+    castling: { whiteKing: true, whiteRookA: true, whiteRookH: true, blackKing: true, blackRookA: true, blackRookH: true },
+    enPassant: null, // [x,y] target square
+    halfmoveClock: 0,
+    fullmove: 1,
+  };
+}
 
-<BoxLink
-  title="Create your first build"
-  description="It should only take a few minutes in total to get up and running for iOS and/or Android."
-  href="/build/setup"
-  Icon={Cube01Icon}
-/>
+/* Generate pseudo-legal moves for piece (including castling targets but not verifying checks) */
+function pseudoMoves(board, x, y, state) {
+  const p = board[x][y];
+  if(!p) return [];
+  const moves = [];
+  const white = isWhite(p);
+  const t = p.toLowerCase();
 
-<BoxLink
-  title="Share your apps with internal testers"
-  description="EAS Build can help share preview builds of your app with a single URL."
-  href="/build/internal-distribution"
-  Icon={Cube01Icon}
-/>
+  if(t === 'p'){
+    const dir = white ? -1 : 1;
+    const startRow = white ? 6 : 1;
+    // forward 1
+    if(inBounds(x+dir, y) && !board[x+dir][y]) {
+      moves.push([x+dir, y]);
+      // forward 2
+      if(x === startRow && !board[x+2*dir][y]) moves.push([x+2*dir, y]);
+    }
+    // captures
+    for(const dy of [-1,1]){
+      const nx = x+dir, ny = y+dy;
+      if(inBounds(nx,ny) && board[nx][ny] && !isSameColor(board[nx][ny], p)) moves.push([nx,ny]);
+    }
+    // en passant (target square available)
+    if(state.enPassant){
+      const [ex,ey] = state.enPassant;
+      if(ex === x + dir && Math.abs(ey - y) === 1) moves.push([ex,ey]);
+    }
+  }
 
-<BoxLink
-  title="Automate submissions"
-  description="Learn how you can have the service take your successful builds and handle uploading them to app stores for you automatically."
-  href="/build/automate-submissions"
-  Icon={Cube01Icon}
-/>
+  if(t === 'n'){
+    const steps = [[2,1],[2,-1],[-2,1],[-2,-1],[1,2],[1,-2],[-1,2],[-1,-2]];
+    for(const [dx,dy] of steps){
+      const nx = x+dx, ny = y+dy;
+      if(inBounds(nx,ny) && (!board[nx][ny] || !isSameColor(board[nx][ny], p))) moves.push([nx,ny]);
+    }
+  }
 
-<BoxLink
-  title="App version management"
-  description="Automate version bumps so you never have to think about them again."
-  href="/build-reference/app-versions"
-  Icon={Cube01Icon}
-/>
+  if(t === 'b' || t === 'r' || t === 'q'){
+    const dirs = [];
+    if(t==='b' || t==='q') dirs.push([1,1],[1,-1],[-1,1],[-1,-1]);
+    if(t==='r' || t==='q') dirs.push([1,0],[-1,0],[0,1],[0,-1]);
+    for(const [dx,dy] of dirs){
+      let nx=x+dx, ny=y+dy;
+      while(inBounds(nx,ny)){
+        if(!board[nx][ny]) moves.push([nx,ny]);
+        else { if(!isSameColor(board[nx][ny], p)) moves.push([nx,ny]); break; }
+        nx += dx; ny += dy;
+      }
+    }
+  }
 
-<BoxLink
-  title="Run builds locally or on your own infrastructure"
-  description="EAS Build is a hosted service, but you can also run it on your own machine, for example, to debug or to comply with any company security policies."
-  href="/build-reference/local-builds"
-  Icon={Cube01Icon}
-/>
+  if(t === 'k'){
+    for(const dx of [-1,0,1]) for(const dy of [-1,0,1]){ if(dx===0&&dy===0) continue; const nx=x+dx, ny=y+dy; if(inBounds(nx,ny) && (!board[nx][ny] || !isSameColor(board[nx][ny], p))) moves.push([nx,ny]); }
+    // castling (only target squares - legality (in check) checked elsewhere)
+    if(white){
+      // king-side
+      if(state.castling.whiteKing && state.castling.whiteRookH){
+        if(!board[7][5] && !board[7][6]) moves.push([7,6]);
+      }
+      if(state.castling.whiteKing && state.castling.whiteRookA){
+        if(!board[7][1] && !board[7][2] && !board[7][3]) moves.push([7,2]);
+      }
+    } else {
+      if(state.castling.blackKing && state.castling.blackRookH){
+        if(!board[0][5] && !board[0][6]) moves.push([0,6]);
+      }
+      if(state.castling.blackKing && state.castling.blackRookA){
+        if(!board[0][1] && !board[0][2] && !board[0][3]) moves.push([0,2]);
+      }
+    }
+  }
 
-<BoxLink
-  title="Limitations"
-  description="EAS Build is new and rapidly evolving, so we recommend getting familiar with the current limitations."
-  href="/build-reference/limitations"
-  Icon={Cube01Icon}
-/>
+  return moves;
+}
+
+/* find king position */
+function findKing(board, white){
+  const target = white ? 'K' : 'k';
+  for(let i=0;i<8;i++) for(let j=0;j<8;j++) if(board[i][j] === target) return [i,j];
+  return null;
+}
+
+/* is side in check? */
+function isInCheck(board, white, state){
+  const kpos = findKing(board, white);
+  if(!kpos) return true;
+  const [kx,ky] = kpos;
+  for(let i=0;i<8;i++) for(let j=0;j<8;j++){
+    const p = board[i][j]; if(!p) continue;
+    if(isWhite(p) === white) continue;
+    const moves = pseudoMoves(board,i,j,state);
+    for(const [mx,my] of moves) if(mx===kx && my===ky) return true;
+  }
+  return false;
+}
+
+/* generate all legal moves for side (filters out those leaving king in check) */
+function legalMoves(board, white, state){
+  const res = [];
+  for(let i=0;i<8;i++) for(let j=0;j<8;j++){
+    const p = board[i][j]; if(!p) continue; if(isWhite(p)!==white) continue;
+    const candidates = pseudoMoves(board,i,j,state);
+    for(const [tx,ty] of candidates){
+      // make move copy
+      const copy = clone(board);
+      const piece = copy[i][j];
+      // special en passant capture handling
+      if(piece.toLowerCase() === 'p' && state.enPassant && tx === state.enPassant[0] && ty === state.enPassant[1] && !copy[tx][ty]){
+        // capture pawn behind target
+        copy[tx][ty] = piece;
+        copy[i][j] = '';
+        copy[i][ty] = '';
+      } else {
+        copy[tx][ty] = copy[i][j];
+        copy[i][j] = '';
+      }
+      // handle castling rook relocation
+      if(piece.toLowerCase()==='k' && Math.abs(ty - j) === 2){
+        if(ty === 6){ // king-side
+          copy[tx][5] = copy[tx][7]; copy[tx][7] = '';
+        } else { // queen-side
+          copy[tx][3] = copy[tx][0]; copy[tx][0] = '';
+        }
+      }
+      // promotion is allowed; but for legality check we assume queen promotion (fine)
+      if(!isInCheck(copy, white, state)) res.push({from:[i,j], to:[tx,ty], piece});
+    }
+  }
+  return res;
+}
+
+/* apply move -> returns new board and new state */
+function applyMove(board, move, state, promotionTo='q'){
+  const b = clone(board);
+  const s = JSON.parse(JSON.stringify(state));
+  const [sx,sy] = move.from, [ex,ey] = move.to;
+  const piece = b[sx][sy];
+
+  // en passant capture
+  if(piece.toLowerCase()==='p' && s.enPassant && ex===s.enPassant[0] && ey===s.enPassant[1] && !b[ex][ey]){
+    b[ex][ey] = b[sx][sy];
+    b[sx][sy] = '';
+    // remove captured pawn
+    b[sx][ey] = '';
+  } else {
+    b[ex][ey] = b[sx][sy];
+    b[sx][sy] = '';
+  }
+
+  // castling rook move handled
+  if(piece.toLowerCase()==='k' && Math.abs(ey - sy) === 2){
+    if(ey === 6){ // king side
+      b[ex][5] = b[ex][7]; b[ex][7] = '';
+    } else {
+      b[ex][3] = b[ex][0]; b[ex][0] = '';
+    }
+  }
+
+  // promotion (if pawn reached last rank)
+  if(piece.toLowerCase() === 'p' && (ex === 0 || ex === 7)){
+    b[ex][ey] = (isWhite(piece) ? promotionTo.toUpperCase() : promotionTo);
+  }
+
+  // update castling rights
+  if(piece.toLowerCase() === 'k'){
+    if(isWhite(piece)){ s.castling.whiteKing = false; s.castling.whiteRookA = false; s.castling.whiteRookH = false; }
+    else { s.castling.blackKing = false; s.castling.blackRookA = false; s.castling.blackRookH = false; }
+  }
+  if(piece.toLowerCase() === 'r'){
+    if(sx===7 && sy===0) s.castling.whiteRookA = false;
+    if(sx===7 && sy===7) s.castling.whiteRookH = false;
+    if(sx===0 && sy===0) s.castling.blackRookA = false;
+    if(sx===0 && sy===7) s.castling.blackRookH = false;
+  }
+
+  // set enPassant target if pawn moved 2
+  s.enPassant = null;
+  if(piece.toLowerCase()==='p' && Math.abs(ex - sx) === 2){
+    s.enPassant = [(sx+ex)/2, sy];
+  }
+
+  // halfmove clock
+  s.halfmoveClock = (piece.toLowerCase()==='p' || !!state.board[ex][ey]) ? 0 : state.halfmoveClock + 1;
+  s.fullmove = state.fullmove + (isWhite(piece) ? 1 : 0);
+  s.board = b;
+  s.turn = state.turn === 'w' ? 'b' : 'w';
+  return s;
+}
+
+/* simple bot: random legal move (optionally prefer captures) */
+function botDoMove(state, level=400){
+  const moves = legalMoves(state.board, false, state);
+  if(moves.length === 0) return state;
+  // heuristic: prefer captures if any
+  const captures = moves.filter(m => {
+    const [tx,ty] = m.to; return !!state.board[tx][ty] && !isSameColor(state.board[tx][ty], m.piece);
+  });
+  const pool = captures.length ? captures : moves;
+  const idx = Math.floor(Math.random()*Math.min(pool.length, Math.max(1, level/200)));
+  const chosen = pool[idx % pool.length];
+  const newState = applyMove(state.board ? state.board : state.board, chosen, state);
+  return newState;
+}
+
+/* UI Component */
+export default function App(){
+  const [state, setState] = useState(() => ({...createInitialState(), board: clone(START_BOARD)}));
+  const [selected, setSelected] = useState(null);
+  const [highlight, setHighlight] = useState([]);
+  const [botElo, setBotElo] = useState(400);
+  const [started, setStarted] = useState(false);
+  const [statusText, setStatusText] = useState("جاهز");
+  const botTimer = useRef(null);
+
+  // When it's bot turn, make a move
+  useEffect(() => {
+    if(!started) return;
+    if(state.turn === 'b'){
+      // small delay
+      botTimer.current = setTimeout(()=>{
+        const newState = botDoMove(state, botElo);
+        setState(prev => ({...newState}));
+      }, 600);
+    }
+    return () => clearTimeout(botTimer.current);
+  }, [state.turn, started]);
+
+  // select or move
+  function onSquarePress(i,j){
+    if(!started) return;
+    if(state.turn === 'b') return;
+    const piece = state.board[i][j];
+    // select own piece
+    if(selected === null){
+      if(!piece) return;
+      if(!isWhite(piece)) return;
+      // show legal moves from this square
+      const moves = legalMoves(state.board, true, state).filter(m => m.from[0]===i && m.from[1]===j);
+      setSelected([i,j]);
+      setHighlight(moves.map(m=>m.to));
+      return;
+    }
+    // we have selected piece -> attempt move
+    const moves = legalMoves(state.board, true, state);
+    const chosen = moves.find(m => m.from[0]===selected[0] && m.from[1]===selected[1] && m.to[0]===i && m.to[1]===j);
+    if(!chosen){
+      // cancel selection if clicked elsewhere
+      setSelected(null);
+      setHighlight([]);
+      return;
+    }
+    // if move is promotion, we choose Queen automatically (can add UI later)
+    const nextState = applyMove(state.board, chosen, state, 'q');
+    setState(nextState);
+    setSelected(null);
+    setHighlight([]);
+  }
+
+  function startGame(){
+    setState({...createInitialState(), board: clone(START_BOARD)});
+    setSelected(null); setHighlight([]); setStarted(true); setStatusText("دورك");
+  }
+
+  function resetGame(){
+    setState({...createInitialState(), board: clone(START_BOARD)});
+    setSelected(null); setHighlight([]); setStarted(false); setStatusText("جاهز");
+  }
+
+  function undo(){
+    // simple undo: not tracked deeply in this example (could keep history)
+    Alert.alert("تراجع", "ميزة التراجع غير مفعلة حاليا. نقدر نضيفها لو تحب.");
+  }
+
+  // check checkmate or stalemate
+  useEffect(()=>{
+    // if started only
+    if(!started) return;
+    const whiteMoves = legalMoves(state.board, true, state);
+    const blackMoves = legalMoves(state.board, false, state);
+    const whiteInCheck = isInCheck(state.board, true, state);
+    const blackInCheck = isInCheck(state.board, false, state);
+    if(state.turn === 'w' && whiteMoves.length === 0){
+      if(whiteInCheck) { Alert.alert("النتيجة", "مهزوم (كش مات)"); setStarted(false); }
+      else { Alert.alert("النتيجة", "تعادل (ستالميت)"); setStarted(false); }
+    }
+    if(state.turn === 'b' && blackMoves.length === 0){
+      if(blackInCheck) { Alert.alert("النتيجة", "فزت — البوت مُكشِت"); setStarted(false); }
+      else { Alert.alert("النتيجة", "تعادل (ستالميت)"); setStarted(false); }
+    }
+  }, [state.board, state.turn, started]);
+
+  /* render board */
+  return (
+    <SafeAreaView style={styles.safe}>
+      <StatusBar barStyle="light-content" />
+      <View style={styles.container}>
+        <Text style={styles.title}>شطرنج ضوء القمر — قسنطينة</Text>
+
+        <View style={styles.controlsRow}>
+          <TouchableOpacity style={styles.btn} onPress={startGame}><Text style={styles.btTxt}>ابدأ</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.btn} onPress={resetGame}><Text style={styles.btTxt}>إعادة</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.btn} onPress={undo}><Text style={styles.btTxt}>تراجع</Text></TouchableOpacity>
+          <View style={{width:8}} />
+          <Text style={styles.small}>Bot: {botElo} Elo</Text>
+        </View>
+
+        <View style={styles.boardWrapper}>
+          <View style={styles.board}>
+            {state.board.map((row,i) => row.map((cell,j) => {
+              const dark = (i + j) % 2 === 1;
+              const isHL = highlight.some(([x,y]) => x===i && y===j);
+              const squareStyle = [styles.square, dark ? styles.dark : styles.light, isHL ? styles.highlight : null];
+              return (
+                <TouchableOpacity key={`${i}-${j}`} activeOpacity={0.9} onPress={() => onSquarePress(i,j)} style={squareStyle}>
+                  {cell ? <Text style={[styles.piece, isWhite(cell) ? styles.pieceWhite : styles.pieceBlack]}>{PIECES[cell]}</Text> : null}
+                </TouchableOpacity>
+              );
+            }))}
+          </View>
+          <View style={styles.moonRim} pointerEvents="none" />
+        </View>
+
+        <Text style={styles.status}>{started ? (state.turn === 'w' ? "دورك" : "دور البوت...") : "جاهز للعب"}</Text>
+
+        <Text style={styles.footer}>لمسات: إضاءة قمرية + ألوان قسنطينة</Text>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+/* Styles (moonlight + Constantine colors) */
+const styles = StyleSheet.create({
+  safe: { flex:1, backgroundColor: "#070617" },
+  container: { flex:1, alignItems:"center", paddingTop: 18 },
+  title: { color:"#dff6ff", fontSize:18, marginBottom:10, fontWeight:"700" },
+  controlsRow: { flexDirection:"row", alignItems:"center", marginBottom:12 },
+  btn: { backgroundColor:"#062033", paddingVertical:8, paddingHorizontal:12, borderRadius:10, marginHorizontal:4, borderWidth:1, borderColor:"rgba(160,220,255,0.06)" },
+  btTxt: { color:"#e7fbff", fontWeight:"600" },
+  small: { color:"#bfeffd", marginLeft:6 },
+  boardWrapper: { width: BOARD_SIZE, height: BOARD_SIZE, borderRadius:14, marginVertical:12, alignItems:"center", justifyContent:"center" },
+  board: { width: BOARD_SIZE, height: BOARD_SIZE, flexDirection:"row", flexWrap:"wrap", borderRadius:14, overflow:"hidden", backgroundColor: "transparent", borderWidth:1, borderColor:"rgba(200,220,255,0.03)" },
+  square: { width: SQUARE, height: SQUARE, alignItems:"center", justifyContent:"center" },
+  light: { backgroundColor: "rgba(230,239,255,0.03)" },
+  dark: { backgroundColor: "rgba(30,40,70,0.75)" },
+  highlight: { borderWidth:2, borderColor:"rgba(158,232,255,0.20)", shadowColor:"#9ee8ff", shadowOffset:{width:0,height:0}, shadowOpacity:0.25, shadowRadius:8, elevation:6 },
+  piece: { fontSize: SQUARE * 0.7, textShadowColor: "rgba(0,0,0,0.6)", textShadowOffset: {width:0, height:2}, textShadowRadius: 6 },
+  pieceWhite: { color:"#e7fbff", textShadowOffset:{width:0,height:3}, textShadowRadius:12 },
+  pieceBlack: { color:"#6ad0d9", textShadowOffset:{width:0,height:3}, textShadowRadius:10 },
+  moonRim: { position:"absolute", width: BOARD_SIZE + 12, height: BOARD_SIZE + 12, borderRadius: 18, top: -6, left: -6, borderWidth:0, shadowColor: "#9ee8ff", shadowOpacity:0.06, shadowRadius: 40, elevation: 8 },
+  status: { color:"#cfeffd", marginTop:6 },
+  footer: { color:"#9ee8ff", fontSize:12, marginTop:8, opacity:0.8 }
+});
